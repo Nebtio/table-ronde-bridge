@@ -44,6 +44,38 @@ const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 let skipTts = process.env.skipTts === 'true';
 if (skipTts) console.log('[Bridge] ⚠️  skipTts=true — ElevenLabs désactivé (mode dev)');
 
+// ── Sécurité : auth par token sur les endpoints coûteux ─────────────────────
+// Rétro-compatible : tant que BRIDGE_TOKEN n'est pas défini, /speak reste ouvert
+// (le pipeline n8n actuel continue de fonctionner). Définis BRIDGE_TOKEN en prod
+// ET ajoute l'en-tête `Authorization: Bearer <token>` dans le nœud "Appeler Bridge".
+const BRIDGE_TOKEN = process.env.BRIDGE_TOKEN;
+if (!BRIDGE_TOKEN) {
+  console.warn('[Bridge] ⚠️  BRIDGE_TOKEN non défini — /speak est OUVERT (aucune authentification).');
+}
+function requireToken(req, res, next) {
+  if (!BRIDGE_TOKEN) return next(); // pas de token configuré → ouvert (rétro-compat)
+  const h = req.headers.authorization || '';
+  const token = h.startsWith('Bearer ') ? h.slice(7) : req.headers['x-bridge-token'];
+  if (token !== BRIDGE_TOKEN) return res.status(401).json({ error: 'Non autorisé' });
+  next();
+}
+
+// ── Rate limiting en mémoire (fenêtre glissante par IP) ─────────────────────
+// n8n appelle via le réseau Docker interne (IP dédiée) ; le trafic externe passe
+// par Traefik (IP partagée), donc une rafale externe est plafonnée sans gêner n8n.
+const RL_WINDOW_MS = 60_000;
+const RL_MAX = 40;
+const rlHits = new Map();
+function rateLimit(req, res, next) {
+  const now = Date.now();
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const recent = (rlHits.get(ip) || []).filter((t) => now - t < RL_WINDOW_MS);
+  if (recent.length >= RL_MAX) return res.status(429).json({ error: 'Trop de requêtes' });
+  recent.push(now);
+  if (recent.length) rlHits.set(ip, recent); else rlHits.delete(ip);
+  next();
+}
+
 // ── Config agents (modèle + voice_id ElevenLabs) ────────────────────────────
 const AGENTS = {
   MC:        { model: 'mistral-small-latest', voiceId: process.env.VOICE_MC },
@@ -107,7 +139,7 @@ function openElevenLabsStream(voiceId, sessionId, speaker) {
 }
 
 // ── POST /speak — point d'entrée appelé par n8n ──────────────────────────────
-app.post('/speak', async (req, res) => {
+app.post('/speak', rateLimit, requireToken, async (req, res) => {
   const { system_prompt, messages, speaker, session_id } = req.body;
 
   if (!system_prompt || !messages || !speaker || !session_id) {
