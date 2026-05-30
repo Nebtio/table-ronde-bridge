@@ -5,8 +5,12 @@ const WebSocket = require('ws');
 const { Mistral } = require('@mistralai/mistralai');
 const { createClient } = require('redis');
 
+const path = require('path');
+
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+// Sert le frontend statique (index.html + images) à la racine
+app.use(express.static(path.join(__dirname, 'public')));
 const httpServer = createServer(app);
 
 // ── Frontend WebSocket (audio + text streaming vers le navigateur) ──────────
@@ -36,6 +40,9 @@ redis.connect();
 
 // ── Mistral ─────────────────────────────────────────────────────────────────
 const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
+
+let skipTts = process.env.skipTts === 'true';
+if (skipTts) console.log('[Bridge] ⚠️  skipTts=true — ElevenLabs désactivé (mode dev)');
 
 // ── Config agents (modèle + voice_id ElevenLabs) ────────────────────────────
 const AGENTS = {
@@ -109,7 +116,7 @@ app.post('/speak', async (req, res) => {
 
   const agent = AGENTS[speaker];
   if (!agent) return res.status(400).json({ error: `Agent inconnu : ${speaker}` });
-  if (!agent.voiceId) return res.status(500).json({ error: `VOICE_${speaker.toUpperCase()} non configuré` });
+  if (!skipTts && !agent.voiceId) return res.status(500).json({ error: `VOICE_${speaker.toUpperCase()} non configuré` });
 
   // Lock Redis anti-chevauchement
   const lockKey = `session:${session_id}:lock`;
@@ -122,8 +129,10 @@ app.post('/speak', async (req, res) => {
   try {
     broadcast({ type: 'speaker_start', speaker, sessionId: session_id });
 
-    // Ouvre le stream ElevenLabs
-    elStream = await openElevenLabsStream(agent.voiceId, session_id, speaker);
+    // Ouvre le stream ElevenLabs (sauf en mode skipTts)
+    if (!skipTts) {
+      elStream = await openElevenLabsStream(agent.voiceId, session_id, speaker);
+    }
 
     // Stream Mistral
     const mistralStream = await mistral.chat.stream({
@@ -145,24 +154,26 @@ app.post('/speak', async (req, res) => {
       // Diffuse le texte brut au frontend (affichage live)
       broadcast({ type: 'text_chunk', speaker, sessionId: session_id, text: delta });
 
-      // Envoie à ElevenLabs par phrase complète (meilleure prosodie)
-      const match = buffer.match(/^(.*?[.!?…]+)\s+/s);
-      if (match) {
-        elStream.ws.send(JSON.stringify({ text: match[1] + ' ' }));
-        buffer = buffer.slice(match[0].length);
+      if (!skipTts) {
+        // Envoie à ElevenLabs par phrase complète (meilleure prosodie)
+        const match = buffer.match(/^(.*?[.!?…]+)\s+/s);
+        if (match) {
+          elStream.ws.send(JSON.stringify({ text: match[1] + ' ' }));
+          buffer = buffer.slice(match[0].length);
+        }
       }
     }
 
-    // Vide le buffer restant
-    if (buffer.trim()) {
-      elStream.ws.send(JSON.stringify({ text: buffer + ' ' }));
+    if (!skipTts) {
+      // Vide le buffer restant
+      if (buffer.trim()) {
+        elStream.ws.send(JSON.stringify({ text: buffer + ' ' }));
+      }
+      // End-Of-Stream → ElevenLabs finalise l'audio
+      elStream.ws.send(JSON.stringify({ text: '' }));
+      // Attend que ElevenLabs ait envoyé tout l'audio
+      await elStream.finishPromise;
     }
-
-    // End-Of-Stream → ElevenLabs finalise l'audio
-    elStream.ws.send(JSON.stringify({ text: '' }));
-
-    // Attend que ElevenLabs ait envoyé tout l'audio
-    await elStream.finishPromise;
 
     broadcast({ type: 'speaker_end', speaker, sessionId: session_id });
 
@@ -177,6 +188,20 @@ app.post('/speak', async (req, res) => {
     await redis.del(lockKey);
     if (elStream?.ws?.readyState === WebSocket.OPEN) elStream.ws.close();
   }
+});
+
+// ── GET /tts  — état courant ─────────────────────────────────────────────────
+app.get('/tts', (_req, res) => {
+  res.json({ skip: skipTts });
+});
+
+// ── POST /tts — { skip: true|false } ────────────────────────────────────────
+app.post('/tts', (req, res) => {
+  const { skip } = req.body;
+  if (typeof skip !== 'boolean') return res.status(400).json({ error: 'skip doit être un booléen' });
+  skipTts = skip;
+  console.log(`[Bridge] TTS ${skipTts ? 'désactivé' : 'activé'} via API`);
+  res.json({ skip: skipTts });
 });
 
 // ── GET /health ──────────────────────────────────────────────────────────────

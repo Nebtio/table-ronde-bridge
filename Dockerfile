@@ -8,6 +8,7 @@ RUN npm install --omit=dev
 
 # Copie le code source
 COPY server.js ./
+COPY public ./public
 
 EXPOSE 3001
 

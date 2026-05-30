@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Table Ronde IA</title>
+<style>
+  :root {
+    --bg: #0e0f13;
+    --panel: #16181f;
+    --border: #262932;
+    --text: #e7e9ee;
+    --muted: #8b909c;
+    --mc: #e8b339;
+    --stratege: #4d9fff;
+    --creatif: #b07cff;
+    --critique: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: radial-gradient(circle at 50% -10%, #1a1d27 0%, var(--bg) 55%);
+    color: var(--text); line-height: 1.5; min-height: 100vh;
+  }
+  header {
+    padding: 18px 24px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .status { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #555; transition: background .3s; }
+  .dot.ok { background: #2ecc71; } .dot.err { background: #ff6b6b; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 24px; }
+
+  /* ── Launcher ── */
+  .launcher {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; margin-bottom: 24px; transition: opacity .3s, max-height .4s, padding .3s, margin .3s;
+    overflow: hidden;
+  }
+  .launcher.collapsed { max-height: 0; padding: 0 20px; margin-bottom: 0; opacity: 0; border-color: transparent; }
+  .launcher label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+  .launcher input {
+    width: 100%; background: #0e0f13; border: 1px solid var(--border); color: var(--text);
+    padding: 9px 11px; border-radius: 8px; font-size: 14px; font-family: inherit;
+  }
+  .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 200px; }
+  button {
+    background: var(--mc); color: #1a1300; border: none; padding: 11px 20px;
+    border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.stop { background: var(--critique); color: #fff; }
+  .tts-row { display: flex; align-items: center; gap: 10px; margin-top: 14px; font-size: 13px; color: var(--muted); }
+  .switch { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: #333; border-radius: 22px; cursor: pointer; transition: background .2s; }
+  .slider:before {
+    content: ''; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+    background: #fff; border-radius: 50%; transition: transform .2s;
+  }
+  input:checked + .slider { background: #2ecc71; }
+  input:checked + .slider:before { transform: translateX(18px); }
+  .tts-label { line-height: 1; }
+
+  /* ── Scène ── */
+  .stage {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px 24px;
+    align-items: start; justify-items: center; margin-bottom: 28px;
+    padding: 8px 0;
+  }
+  /* MC trône au centre sur la rangée du haut */
+  .seat[data-role="MC"] { grid-column: 1 / -1; }
+  .seat {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    transition: transform .35s cubic-bezier(.34,1.56,.64,1), opacity .35s; opacity: .62;
+  }
+  .avatar {
+    --c: var(--muted);
+    width: 92px; height: 92px; border-radius: 50%; position: relative;
+    background-size: cover; background-position: center;
+    box-shadow: 0 0 0 2px #0e0f13, 0 0 0 4px var(--c);
+    transition: box-shadow .35s, width .35s, height .35s;
+  }
+  .seat[data-role="MC"] .avatar { width: 108px; height: 108px; }
+  .avatar:after {
+    content: ''; position: absolute; inset: -10px; border-radius: 50%;
+    border: 2px solid var(--c); opacity: 0; transition: opacity .3s;
+  }
+  .seat .name {
+    font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px;
+    color: var(--c-name);
+  }
+  .seat .role-tag { font-size: 10px; color: var(--muted); margin-top: -4px; }
+
+  /* État "parle" */
+  .seat.active { opacity: 1; transform: translateY(-6px) scale(1.06); }
+  .seat.active .avatar { box-shadow: 0 0 0 2px #0e0f13, 0 0 0 4px var(--c), 0 0 28px 2px var(--c); }
+  .seat.active .avatar:after { opacity: 1; animation: ring 1.6s ease-out infinite; }
+  @keyframes ring {
+    0% { transform: scale(.85); opacity: .9; }
+    100% { transform: scale(1.25); opacity: 0; }
+  }
+
+  .seat[data-role="MC"]      { --c: var(--mc);       --c-name: var(--mc); }
+  .seat[data-role="Stratège"]{ --c: var(--stratege); --c-name: var(--stratege); }
+  .seat[data-role="Créatif"] { --c: var(--creatif);  --c-name: var(--creatif); }
+  .seat[data-role="Critique"]{ --c: var(--critique); --c-name: var(--critique); }
+
+  /* ── Transcript ── */
+  .transcript { display: flex; flex-direction: column; gap: 14px; }
+  .turn {
+    display: flex; gap: 12px; align-items: flex-start;
+    opacity: 0; transform: translateY(8px); animation: in .3s forwards;
+  }
+  @keyframes in { to { opacity: 1; transform: none; } }
+  .turn .mini {
+    flex-shrink: 0; width: 38px; height: 38px; border-radius: 50%;
+    background-size: cover; background-position: center; margin-top: 2px;
+    box-shadow: 0 0 0 2px var(--c);
+  }
+  .bubble {
+    flex: 1; background: var(--panel); border: 1px solid var(--border);
+    border-left: 3px solid var(--c); border-radius: 10px; padding: 12px 15px;
+  }
+  .turn .who { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 5px; color: var(--c); }
+  .turn .txt { font-size: 15px; white-space: pre-wrap; }
+  .turn[data-role="MC"]      { --c: var(--mc); }
+  .turn[data-role="Stratège"]{ --c: var(--stratege); }
+  .turn[data-role="Créatif"] { --c: var(--creatif); }
+  .turn[data-role="Critique"]{ --c: var(--critique); }
+  .empty { color: var(--muted); text-align: center; padding: 50px 0; font-size: 14px; }
+
+  @media (max-width: 560px) {
+    .avatar { width: 72px; height: 72px; }
+    .seat[data-role="MC"] .avatar { width: 84px; height: 84px; }
+    .stage { gap: 12px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎙 Table Ronde IA</h1>
+  <div class="status"><span class="dot" id="dot"></span><span id="statusText">Déconnecté</span></div>
+</header>
+<div class="wrap">
+  <div class="launcher" id="launcher">
+    <div class="row">
+      <div>
+        <label>Sujet du débat</label>
+        <input id="topic" value="L'avenir de l'intelligence artificielle" />
+      </div>
+      <button id="startBtn">▶ Démarrer le débat</button>
+    </div>
+    <div class="tts-row">
+      <label class="switch">
+        <input type="checkbox" id="ttsToggle" />
+        <span class="slider"></span>
+      </label>
+      <span class="tts-label" id="ttsLabel">Audio désactivé</span>
+    </div>
+  </div>
+
+  <!-- Scène : les 4 intervenants autour de la table -->
+  <div class="stage" id="stage">
+    <div class="seat" data-role="MC">
+      <div class="avatar" style="background-image:url('Image/MC.png')"></div>
+      <div class="name">MC</div><div class="role-tag">Animateur</div>
+    </div>
+    <div class="seat" data-role="Stratège">
+      <div class="avatar" style="background-image:url('Image/Strat%C3%A8ge.png')"></div>
+      <div class="name">Stratège</div><div class="role-tag">Analyse</div>
+    </div>
+    <div class="seat" data-role="Créatif">
+      <div class="avatar" style="background-image:url('Image/Cr%C3%A9atif.png')"></div>
+      <div class="name">Créatif</div><div class="role-tag">Idées</div>
+    </div>
+    <div class="seat" data-role="Critique">
+      <div class="avatar" style="background-image:url('Image/Critique.png')"></div>
+      <div class="name">Critique</div><div class="role-tag">Contradiction</div>
+    </div>
+  </div>
+
+  <div class="transcript" id="transcript">
+    <div class="empty">Choisissez un sujet et démarrez le débat.</div>
+  </div>
+</div>
+
+<audio id="player"></audio>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const dot = $('dot'), statusText = $('statusText'), transcript = $('transcript');
+
+// Avatars par rôle (chemins encodés pour les accents)
+const AVATARS = {
+  'MC':        "Image/MC.png",
+  'Stratège':  "Image/Strat%C3%A8ge.png",
+  'Créatif':   "Image/Cr%C3%A9atif.png",
+  'Critique':  "Image/Critique.png",
+};
+
+// ── URLs (modifiables via console : localStorage.setItem('tr_webhookUrl', '...')) ──
+// Par défaut le WS pointe sur l'origine qui sert cette page (le bridge lui-même).
+const DEFAULT_WS = location.protocol === 'https:'
+  ? 'wss://' + location.host
+  : 'ws://' + location.host;
+const WEBHOOK_URL = localStorage.getItem('tr_webhookUrl') || 'https://n8nmvp.nebt.pro/webhook/debate/start';
+const WS_URL      = localStorage.getItem('tr_wsUrl')     || DEFAULT_WS;
+
+// ── Persistance sujet ─────────────────────────────────────────────────────────
+const saved = localStorage.getItem('tr_topic');
+if (saved) $('topic').value = saved;
+$('topic').addEventListener('input', () => localStorage.setItem('tr_topic', $('topic').value));
+
+function setStatus(text, cls) { statusText.textContent = text; dot.className = 'dot' + (cls ? ' ' + cls : ''); }
+
+// ── Scène : surbrillance de l'intervenant actif ──────────────────────────────
+function highlightSeat(speaker) {
+  document.querySelectorAll('.seat').forEach(s =>
+    s.classList.toggle('active', s.dataset.role === speaker));
+}
+function clearSeats() {
+  document.querySelectorAll('.seat').forEach(s => s.classList.remove('active'));
+}
+
+// ── Lecture audio MP3 en streaming (MediaSource) ────────────────────────────
+const player = $('player');
+let mediaSource, sourceBuffer, audioQueue = [], sbReady = false;
+
+function initAudio() {
+  mediaSource = new MediaSource();
+  player.src = URL.createObjectURL(mediaSource);
+  sbReady = false; audioQueue = [];
+  mediaSource.addEventListener('sourceopen', () => {
+    try {
+      sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
+      sourceBuffer.addEventListener('updateend', pump);
+      sbReady = true; pump();
+    } catch (e) { console.error('MSE audio/mpeg non supporté:', e); }
+  });
+  player.play().catch(() => {});
+}
+function pump() {
+  if (sbReady && sourceBuffer && !sourceBuffer.updating && audioQueue.length) {
+    try { sourceBuffer.appendBuffer(audioQueue.shift()); } catch (e) { console.error(e); }
+  }
+}
+function enqueueAudio(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  audioQueue.push(bytes); pump();
+  if (player.paused) player.play().catch(() => {});
+}
+
+// ── Transcript ──────────────────────────────────────────────────────────────
+let currentTurn = null;
+
+function startTurn(speaker) {
+  if (transcript.querySelector('.empty')) transcript.innerHTML = '';
+  const el = document.createElement('div');
+  el.className = 'turn';
+  el.dataset.role = speaker;
+  const avatar = AVATARS[speaker] || '';
+  el.innerHTML =
+    `<div class="mini" style="background-image:url('${avatar}')"></div>` +
+    `<div class="bubble"><div class="who">${speaker}</div><div class="txt"></div></div>`;
+  transcript.appendChild(el);
+  currentTurn = el.querySelector('.txt');
+  el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  highlightSeat(speaker);
+  return el;
+}
+function appendText(t) { if (currentTurn) currentTurn.textContent += t; }
+function endTurn() { clearSeats(); }
+
+// ── WebSocket bridge ─────────────────────────────────────────────────────────
+let ws, activeEl = null, currentSession = null;
+function connectWS() {
+  const url = WS_URL;
+  if (!url) { alert('URL WebSocket non configurée.'); return false; }
+  // Ferme toute connexion précédente pour éviter les doublons
+  if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} }
+  ws = new WebSocket(url);
+  ws.onopen = () => setStatus('Connecté au bridge', 'ok');
+  ws.onclose = () => setStatus('Déconnecté', '');
+  ws.onerror = () => setStatus('Erreur WebSocket', 'err');
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    // Ne traiter que les messages de NOTRE session
+    if (msg.sessionId && currentSession && msg.sessionId !== currentSession) return;
+    if (msg.type === 'speaker_start') { activeEl = startTurn(msg.speaker); }
+    else if (msg.type === 'text_chunk') { appendText(msg.text); }
+    else if (msg.type === 'audio') { enqueueAudio(msg.data); }
+    else if (msg.type === 'speaker_end') { endTurn(); }
+    else if (msg.type === 'error') { setStatus('Erreur: ' + msg.message, 'err'); }
+  };
+  return true;
+}
+
+// ── Démarrage / Arrêt ─────────────────────────────────────────────────────────
+let running = false;
+const startBtn = $('startBtn');
+
+function setRunning(on) {
+  running = on;
+  startBtn.textContent = on ? '⏹ Arrêter le débat' : '▶ Démarrer le débat';
+  startBtn.classList.toggle('stop', on);
+  $('launcher').classList.toggle('collapsed', on); // masque la config pendant le débat
+}
+
+function stopDebate() {
+  currentSession = null; // ignore tout message résiduel
+  if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} ws = null; }
+  try { player.pause(); } catch (e) {}
+  audioQueue = []; sbReady = false;
+  clearSeats();
+  setRunning(false);
+  setStatus('Débat arrêté', '');
+}
+
+function startDebate() {
+  const webhook = WEBHOOK_URL;
+  if (!webhook) { alert('URL webhook non configurée.'); return; }
+  transcript.innerHTML = '<div class="empty">Connexion…</div>';
+  // Nouvelle session AVANT la connexion, pour filtrer les messages
+  currentSession = 'session_' + Date.now();
+  initAudio();
+  if (!connectWS()) return;
+  setRunning(true);
+  // Fire-and-forget : on n'attend pas la fin du débat, l'audio arrive par WebSocket
+  fetch(webhook, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic: $('topic').value.trim(), session_id: currentSession }),
+  })
+    .then(() => { if (running) setStatus('Débat terminé', 'ok'); setRunning(false); })
+    .catch(() => setStatus('Webhook injoignable', 'err'));
+  setStatus('Débat lancé — en attente du premier intervenant…', 'ok');
+}
+
+startBtn.onclick = () => { running ? stopDebate() : startDebate(); };
+
+// ── Toggle TTS ───────────────────────────────────────────────────────────────
+const ttsToggle = $('ttsToggle');
+const ttsLabel  = $('ttsLabel');
+
+function bridgeHttpUrl() {
+  return WS_URL.replace(/^ws(s)?:\/\//, 'http$1://');
+}
+
+function updateTtsLabel(skip) {
+  ttsLabel.textContent = skip ? 'Audio désactivé' : 'Audio activé';
+}
+
+// Charge l'état courant du bridge au démarrage
+async function loadTtsState() {
+  try {
+    const r = await fetch(bridgeHttpUrl() + '/tts');
+    if (!r.ok) return;
+    const { skip } = await r.json();
+    ttsToggle.checked = !skip;
+    updateTtsLabel(skip);
+  } catch (e) { /* bridge pas encore joignable */ }
+}
+loadTtsState();
+
+ttsToggle.addEventListener('change', async () => {
+  const skip = !ttsToggle.checked;
+  updateTtsLabel(skip);
+  try {
+    await fetch(bridgeHttpUrl() + '/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skip }),
+    });
+  } catch (e) {
+    setStatus('Impossible de joindre le bridge', 'err');
+    ttsToggle.checked = !ttsToggle.checked; // annule le toggle
+    updateTtsLabel(!skip);
+  }
+});
+</script>
+</body>
+</html>
