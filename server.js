@@ -36,13 +36,37 @@ function broadcast(data) {
 // ── Redis ───────────────────────────────────────────────────────────────────
 const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
 redis.on('error', (err) => console.error('[Redis]', err));
-redis.connect();
+redis.connect().then(loadTtsConfig);
 
 // ── Mistral ─────────────────────────────────────────────────────────────────
 const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 
-let skipTts = process.env.skipTts === 'true';
-if (skipTts) console.log('[Bridge] ⚠️  skipTts=true — ElevenLabs désactivé (mode dev)');
+// ── Config TTS (provider + modèles), persistée dans Redis ───────────────────
+// Modifiable à chaud via /tts/config (page d'admin) ; survit aux redémarrages.
+const DEFAULT_TTS = {
+  enabled: !(process.env.skipTts === 'true'), // rétro-compat : skipTts=true → audio off
+  provider: 'openai',                          // 'openai' | 'elevenlabs'
+  openaiModel: 'gpt-4o-mini-tts',              // moins cher / multilingue
+  elevenModel: process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5',
+};
+const ttsConfig = { ...DEFAULT_TTS };
+const TTS_CONFIG_KEY = 'bridge:tts:config';
+
+async function loadTtsConfig() {
+  if (!redis.isReady) return;
+  try {
+    const raw = await redis.get(TTS_CONFIG_KEY);
+    if (raw) {
+      Object.assign(ttsConfig, JSON.parse(raw));
+      console.log('[Bridge] Config TTS chargée depuis Redis :', ttsConfig);
+    }
+  } catch (e) { console.error('[Bridge] loadTtsConfig :', e.message); }
+}
+async function saveTtsConfig() {
+  if (!redis.isReady) return; // Redis indisponible → on garde la config en mémoire sans bloquer
+  try { await redis.set(TTS_CONFIG_KEY, JSON.stringify(ttsConfig)); }
+  catch (e) { console.error('[Bridge] saveTtsConfig :', e.message); }
+}
 
 // ── Sécurité : auth par token sur les endpoints coûteux ─────────────────────
 // Rétro-compatible : tant que BRIDGE_TOKEN n'est pas défini, /speak reste ouvert
@@ -76,19 +100,38 @@ function rateLimit(req, res, next) {
   next();
 }
 
-// ── Config agents (modèle + voice_id ElevenLabs) ────────────────────────────
+// ── Config agents (modèle Mistral + voix ElevenLabs + voix OpenAI) ──────────
+// Voix OpenAI dispo : alloy, ash, ballad, coral, echo, fable, nova, onyx, sage, shimmer, verse
 const AGENTS = {
-  MC:        { model: 'mistral-small-latest', voiceId: process.env.VOICE_MC },
-  Stratège:  { model: 'mistral-large-latest', voiceId: process.env.VOICE_STRATEGE },
-  Créatif:   { model: 'mistral-large-latest', voiceId: process.env.VOICE_CREATIF },
-  Critique:  { model: 'mistral-large-latest', voiceId: process.env.VOICE_CRITIQUE },
+  MC:        { model: 'mistral-small-latest', voiceId: process.env.VOICE_MC,       openaiVoice: process.env.VOICE_OPENAI_MC       || 'onyx' },
+  Stratège:  { model: 'mistral-large-latest', voiceId: process.env.VOICE_STRATEGE, openaiVoice: process.env.VOICE_OPENAI_STRATEGE || 'echo' },
+  Créatif:   { model: 'mistral-large-latest', voiceId: process.env.VOICE_CREATIF,  openaiVoice: process.env.VOICE_OPENAI_CREATIF  || 'nova' },
+  Critique:  { model: 'mistral-large-latest', voiceId: process.env.VOICE_CRITIQUE, openaiVoice: process.env.VOICE_OPENAI_CRITIQUE || 'fable' },
 };
+
+// ── OpenAI TTS : texte → MP3 base64 (un appel par phrase) ───────────────────
+async function openAITTS(text, voice, model) {
+  const resp = await fetch('https://api.openai.com/v1/audio/speech', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ model, voice, input: text, response_format: 'mp3' }),
+  });
+  if (!resp.ok) {
+    const errTxt = await resp.text();
+    throw new Error(`OpenAI TTS ${resp.status}: ${errTxt.slice(0, 200)}`);
+  }
+  const buf = Buffer.from(await resp.arrayBuffer());
+  return buf.toString('base64');
+}
 
 // ── Ouvre un stream ElevenLabs WebSocket ────────────────────────────────────
 function openElevenLabsStream(voiceId, sessionId, speaker) {
   return new Promise((resolve, reject) => {
-    // Flash v2.5 = modèle ElevenLabs le moins cher (~0,5 crédit/caractère, multilingue FR)
-    const model = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';
+    // Modèle lu depuis la config (Flash v2.5 = le moins cher, multilingue FR)
+    const model = ttsConfig.elevenModel || process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';
     const url =
       `wss://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream-input` +
       `?model_id=${model}&output_format=mp3_44100_128`;
@@ -150,7 +193,17 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
 
   const agent = AGENTS[speaker];
   if (!agent) return res.status(400).json({ error: `Agent inconnu : ${speaker}` });
-  if (!skipTts && !agent.voiceId) return res.status(500).json({ error: `VOICE_${speaker.toUpperCase()} non configuré` });
+
+  const ttsOn = ttsConfig.enabled;
+  const provider = ttsConfig.provider;
+
+  // Vérifs de config selon le provider choisi
+  if (ttsOn && provider === 'elevenlabs' && !agent.voiceId) {
+    return res.status(500).json({ error: `VOICE_${speaker.toUpperCase()} non configuré` });
+  }
+  if (ttsOn && provider === 'openai' && !process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: 'OPENAI_API_KEY non configuré' });
+  }
 
   // Lock Redis anti-chevauchement
   const lockKey = `session:${session_id}:lock`;
@@ -158,14 +211,31 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
   if (!locked) return res.status(409).json({ error: 'Un autre intervenant est actif' });
 
   let fullText = '';
-  let elStream;
+  let elStream = null;
+  let openaiChain = Promise.resolve();
+
+  // Abstraction provider : sendSentence(text) NON bloquant + finish() + close()
+  const tts = { sendSentence: () => {}, finish: async () => {}, close: () => {} };
 
   try {
     broadcast({ type: 'speaker_start', speaker, sessionId: session_id });
 
-    // Ouvre le stream ElevenLabs (sauf en mode skipTts)
-    if (!skipTts) {
+    if (ttsOn && provider === 'elevenlabs') {
       elStream = await openElevenLabsStream(agent.voiceId, session_id, speaker);
+      tts.sendSentence = (t) => { if (t.trim()) elStream.ws.send(JSON.stringify({ text: t + ' ' })); };
+      tts.finish = async () => { elStream.ws.send(JSON.stringify({ text: '' })); await elStream.finishPromise; };
+      tts.close = () => { if (elStream?.ws?.readyState === WebSocket.OPEN) elStream.ws.close(); };
+    } else if (ttsOn && provider === 'openai') {
+      // Chaînage séquentiel → garantit l'ordre des segments audio, sans bloquer Mistral
+      tts.sendSentence = (t) => {
+        const text = t.trim();
+        if (!text) return;
+        openaiChain = openaiChain
+          .then(() => openAITTS(text, agent.openaiVoice, ttsConfig.openaiModel))
+          .then((b64) => broadcast({ type: 'audio', speaker, sessionId: session_id, data: b64 }))
+          .catch((e) => console.error('[OpenAI TTS]', e.message));
+      };
+      tts.finish = async () => { await openaiChain; };
     }
 
     // Stream Mistral
@@ -188,25 +258,19 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
       // Diffuse le texte brut au frontend (affichage live)
       broadcast({ type: 'text_chunk', speaker, sessionId: session_id, text: delta });
 
-      if (!skipTts) {
-        // Envoie à ElevenLabs par phrase complète (meilleure prosodie)
+      if (ttsOn) {
+        // Découpe par phrase complète (meilleure prosodie pour les 2 providers)
         const match = buffer.match(/^(.*?[.!?…]+)\s+/s);
         if (match) {
-          elStream.ws.send(JSON.stringify({ text: match[1] + ' ' }));
+          tts.sendSentence(match[1]);
           buffer = buffer.slice(match[0].length);
         }
       }
     }
 
-    if (!skipTts) {
-      // Vide le buffer restant
-      if (buffer.trim()) {
-        elStream.ws.send(JSON.stringify({ text: buffer + ' ' }));
-      }
-      // End-Of-Stream → ElevenLabs finalise l'audio
-      elStream.ws.send(JSON.stringify({ text: '' }));
-      // Attend que ElevenLabs ait envoyé tout l'audio
-      await elStream.finishPromise;
+    if (ttsOn) {
+      if (buffer.trim()) tts.sendSentence(buffer); // vide le reste
+      await tts.finish();                          // attend la fin de l'audio
     }
 
     broadcast({ type: 'speaker_end', speaker, sessionId: session_id });
@@ -220,22 +284,50 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally {
     await redis.del(lockKey);
-    if (elStream?.ws?.readyState === WebSocket.OPEN) elStream.ws.close();
+    tts.close();
   }
 });
 
-// ── GET /tts  — état courant ─────────────────────────────────────────────────
+// ── GET /tts — état courant (compat : skip = audio désactivé) ───────────────
 app.get('/tts', (_req, res) => {
-  res.json({ skip: skipTts });
+  res.json({ skip: !ttsConfig.enabled });
 });
 
-// ── POST /tts — { skip: true|false } ────────────────────────────────────────
-app.post('/tts', (req, res) => {
+// ── POST /tts — { skip: true|false } (compat, garde l'ancien toggle) ────────
+app.post('/tts', async (req, res) => {
   const { skip } = req.body;
   if (typeof skip !== 'boolean') return res.status(400).json({ error: 'skip doit être un booléen' });
-  skipTts = skip;
-  console.log(`[Bridge] TTS ${skipTts ? 'désactivé' : 'activé'} via API`);
-  res.json({ skip: skipTts });
+  ttsConfig.enabled = !skip;
+  await saveTtsConfig();
+  console.log(`[Bridge] TTS ${ttsConfig.enabled ? 'activé' : 'désactivé'} via API`);
+  res.json({ skip: !ttsConfig.enabled });
+});
+
+// ── GET /tts/config — config complète + providers dispo (lecture ouverte) ───
+app.get('/tts/config', (_req, res) => {
+  res.json({
+    enabled: ttsConfig.enabled,
+    provider: ttsConfig.provider,
+    openaiModel: ttsConfig.openaiModel,
+    elevenModel: ttsConfig.elevenModel,
+    providers: {
+      openai: { available: !!process.env.OPENAI_API_KEY, models: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'] },
+      elevenlabs: { available: !!process.env.ELEVENLABS_API_KEY, models: ['eleven_flash_v2_5', 'eleven_multilingual_v2'] },
+    },
+    tokenRequired: !!BRIDGE_TOKEN,
+  });
+});
+
+// ── POST /tts/config — met à jour la config (écriture protégée par token) ───
+app.post('/tts/config', requireToken, async (req, res) => {
+  const { enabled, provider, openaiModel, elevenModel } = req.body;
+  if (typeof enabled === 'boolean') ttsConfig.enabled = enabled;
+  if (provider === 'openai' || provider === 'elevenlabs') ttsConfig.provider = provider;
+  if (typeof openaiModel === 'string' && openaiModel) ttsConfig.openaiModel = openaiModel;
+  if (typeof elevenModel === 'string' && elevenModel) ttsConfig.elevenModel = elevenModel;
+  await saveTtsConfig();
+  console.log('[Bridge] Config TTS mise à jour :', ttsConfig);
+  res.json(ttsConfig);
 });
 
 // ── GET /transcript/:session_id — historique complet du débat (lecture Redis) ──
@@ -259,5 +351,7 @@ httpServer.listen(PORT, () => {
   console.log(`\n🎙  Bridge Table Ronde démarré`);
   console.log(`   HTTP  → http://localhost:${PORT}/speak`);
   console.log(`   WS    → ws://localhost:${PORT}`);
-  console.log(`   Redis → ${process.env.REDIS_URL || 'redis://localhost:6379'}\n`);
+  console.log(`   Admin → http://localhost:${PORT}/admin.html`);
+  console.log(`   Redis → ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
+  console.log(`   TTS   → ${ttsConfig.enabled ? ttsConfig.provider : 'désactivé'}\n`);
 });
