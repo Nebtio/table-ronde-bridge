@@ -236,6 +236,17 @@ app.post('/tts', (req, res) => {
   res.json({ skip: skipTts });
 });
 
+// ── GET /transcript/:session_id — historique complet du débat (lecture Redis) ──
+app.get('/transcript/:session_id', requireToken, async (req, res) => {
+  try {
+    const raw = await redis.get(`session:${req.params.session_id}:history`);
+    const turns = raw ? JSON.parse(raw) : [];
+    res.json({ session_id: req.params.session_id, turns });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET /health ──────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => {
   res.json({ status: 'ok', frontendClients: frontendClients.size });
