@@ -124,7 +124,6 @@
     flex: 1; background: var(--panel); border: 1px solid var(--border);
     border-left: 3px solid var(--c); border-radius: 10px; padding: 12px 15px;
   }
-  .turn .who { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; margin-bottom: 5px; color: var(--c); }
   .turn .txt { font-size: 15px; white-space: pre-wrap; }
   .turn[data-role="MC"]      { --c: var(--mc); }
   .turn[data-role="Stratège"]{ --c: var(--stratege); }
@@ -284,7 +283,7 @@ function startTurn(speaker) {
   const avatar = AVATARS[speaker] || '';
   el.innerHTML =
     `<div class="mini" style="background-image:url('${avatar}')"></div>` +
-    `<div class="bubble"><div class="who">${speaker}</div><div class="txt"></div></div>`;
+    `<div class="bubble"><div class="txt"></div></div>`;
   transcript.appendChild(el);
   currentTurn = el.querySelector('.txt');
   el.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -297,9 +296,13 @@ function startTurn(speaker) {
   }
   return el;
 }
+function stripStageDir(t) {
+  return t.replace(/\*{0,2}\[[^\]]{1,80}\]\*{0,2}\s*/g, '').replace(/^\s*[-–—]\s*/, '');
+}
 function appendText(t) {
-  if (currentTurn) currentTurn.textContent += t;
-  if (currentLogTurn) currentLogTurn.text += t;
+  const clean = stripStageDir(t);
+  if (currentTurn) currentTurn.textContent += clean;
+  if (currentLogTurn) currentLogTurn.text += clean;
 }
 function endTurn() { clearSeats(); }
 
