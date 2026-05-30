@@ -63,19 +63,8 @@
   input:checked + .slider { background: #2ecc71; }
   input:checked + .slider:before { transform: translateX(18px); }
   .tts-label { line-height: 1; }
-
-  /* ── Panneau réglages audio ── */
-  .settings { margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px; }
-  .set-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
-  .set-grid.hidden, .set-token.hidden { display: none; }
-  .set-lbl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
-  .settings select, .settings input[type=password] {
-    width: 100%; background: #0e0f13; border: 1px solid var(--border); color: var(--text);
-    padding: 8px 10px; border-radius: 8px; font-size: 13px; font-family: inherit;
-  }
-  .set-token { margin-top: 12px; max-width: 320px; }
-  .set-hint { font-size: 12px; margin-top: 8px; min-height: 14px; color: var(--muted); }
-  .set-hint.ok { color: #2ecc71; } .set-hint.err { color: #ff6b6b; }
+  .set-link { margin-left: auto; color: var(--muted); text-decoration: none; font-size: 13px; }
+  .set-link:hover { color: var(--text); }
 
   /* ── Scène ── */
   .stage {
@@ -178,32 +167,13 @@
       </div>
       <button id="startBtn">▶ Démarrer le débat</button>
     </div>
-    <div class="settings" id="settings">
-      <div class="tts-row">
-        <label class="switch">
-          <input type="checkbox" id="ttsToggle" />
-          <span class="slider"></span>
-        </label>
-        <span class="tts-label" id="ttsLabel">Audio désactivé</span>
-      </div>
-      <div class="set-grid hidden" id="ttsOptions">
-        <div>
-          <label class="set-lbl">Fournisseur de voix</label>
-          <select id="provSel">
-            <option value="openai">OpenAI</option>
-            <option value="elevenlabs">ElevenLabs</option>
-          </select>
-        </div>
-        <div>
-          <label class="set-lbl">Modèle</label>
-          <select id="modelSel"></select>
-        </div>
-      </div>
-      <div class="set-token hidden" id="tokenRow">
-        <label class="set-lbl">Token bridge (requis pour modifier les réglages)</label>
-        <input type="password" id="tokenInput" placeholder="Bearer token…" autocomplete="off" />
-      </div>
-      <div class="set-hint" id="setHint"></div>
+    <div class="tts-row">
+      <label class="switch">
+        <input type="checkbox" id="ttsToggle" />
+        <span class="slider"></span>
+      </label>
+      <span class="tts-label" id="ttsLabel">Audio désactivé</span>
+      <a href="admin.html" class="set-link" title="Réglages (modèle, voix)">⚙ Réglages</a>
     </div>
   </div>
 
@@ -448,94 +418,43 @@ function startDebate() {
 
 startBtn.onclick = () => { running ? stopDebate() : startDebate(); };
 
-// ── Panneau réglages audio (TTS : on/off + fournisseur + modèle) ─────────────
+// ── Bouton audio (on/off) — le choix du modèle/voix est dans /admin.html ─────
 const ttsToggle = $('ttsToggle');
 const ttsLabel  = $('ttsLabel');
-const provSel   = $('provSel');
-const modelSel  = $('modelSel');
-const tokenInput = $('tokenInput');
-const TOKEN_KEY = 'tr_bridgeToken';
-let ttsCfg = null;
 
 function bridgeHttpUrl() {
   return WS_URL.replace(/^ws(s)?:\/\//, 'http$1://');
 }
-function setSetHint(msg, cls) {
-  const h = $('setHint'); h.textContent = msg || ''; h.className = 'set-hint' + (cls ? ' ' + cls : '');
-}
-function updateTtsLabel() {
-  ttsLabel.textContent = ttsToggle.checked ? 'Audio activé' : 'Audio désactivé';
-  $('ttsOptions').classList.toggle('hidden', !ttsToggle.checked);
-}
-function providerLabel(v) { return v === 'openai' ? 'OpenAI' : 'ElevenLabs'; }
-
-function fillModelOptions() {
-  if (!ttsCfg) return;
-  const prov = provSel.value;
-  const info = ttsCfg.providers[prov] || { models: [] };
-  const current = prov === 'openai' ? ttsCfg.openaiModel : ttsCfg.elevenModel;
-  modelSel.innerHTML = '';
-  (info.models || []).forEach((m) => {
-    const o = document.createElement('option');
-    o.value = m; o.textContent = m; if (m === current) o.selected = true;
-    modelSel.appendChild(o);
-  });
-  // Grise un fournisseur dont la clé API manque côté bridge
-  [...provSel.options].forEach((o) => {
-    const av = ttsCfg.providers[o.value] && ttsCfg.providers[o.value].available;
-    o.disabled = !av;
-    o.textContent = providerLabel(o.value) + (av ? '' : ' (clé manquante)');
-  });
+function updateTtsLabel(skip) {
+  ttsLabel.textContent = skip ? 'Audio désactivé' : 'Audio activé';
 }
 
-// Charge la config courante du bridge au démarrage
+// Charge l'état courant du bridge au démarrage
 async function loadTtsState() {
   try {
-    const r = await fetch(bridgeHttpUrl() + '/tts/config');
+    const r = await fetch(bridgeHttpUrl() + '/tts');
     if (!r.ok) return;
-    ttsCfg = await r.json();
-    ttsToggle.checked = !!ttsCfg.enabled;
-    provSel.value = ttsCfg.provider;
-    fillModelOptions();
-    updateTtsLabel();
-    $('tokenRow').classList.toggle('hidden', !ttsCfg.tokenRequired);
-    tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
+    const { skip } = await r.json();
+    ttsToggle.checked = !skip;
+    updateTtsLabel(skip);
   } catch (e) { /* bridge pas encore joignable */ }
 }
 loadTtsState();
 
-// Envoie un patch de config ; revert() restaure l'UI en cas d'échec
-async function pushTtsConfig(patch, revert) {
-  const token = tokenInput.value.trim();
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  setSetHint('Enregistrement…');
+ttsToggle.addEventListener('change', async () => {
+  const skip = !ttsToggle.checked;
+  updateTtsLabel(skip);
   try {
-    const r = await fetch(bridgeHttpUrl() + '/tts/config', {
+    await fetch(bridgeHttpUrl() + '/tts', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
-      body: JSON.stringify(patch),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skip }),
     });
-    if (r.status === 401) { setSetHint('Token invalide ou manquant.', 'err'); if (revert) revert(); return; }
-    if (!r.ok) { setSetHint('Erreur ' + r.status, 'err'); if (revert) revert(); return; }
-    ttsCfg = { ...ttsCfg, ...(await r.json()) };
-    setSetHint('✓ Enregistré', 'ok');
-    setTimeout(() => setSetHint(''), 1500);
   } catch (e) {
-    setSetHint('Bridge injoignable', 'err'); if (revert) revert();
+    setStatus('Impossible de joindre le bridge', 'err');
+    ttsToggle.checked = !ttsToggle.checked; // annule le toggle
+    updateTtsLabel(!skip);
   }
-}
-
-ttsToggle.addEventListener('change', () => {
-  updateTtsLabel();
-  pushTtsConfig({ enabled: ttsToggle.checked }, () => { ttsToggle.checked = !ttsToggle.checked; updateTtsLabel(); });
-});
-provSel.addEventListener('change', () => {
-  fillModelOptions();
-  const modelPatch = provSel.value === 'openai' ? { openaiModel: modelSel.value } : { elevenModel: modelSel.value };
-  pushTtsConfig({ provider: provSel.value, ...modelPatch });
-});
-modelSel.addEventListener('change', () => {
-  pushTtsConfig(provSel.value === 'openai' ? { openaiModel: modelSel.value } : { elevenModel: modelSel.value });
 });
 </script>
 </body>
