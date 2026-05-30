@@ -68,6 +68,32 @@
   .set-link { margin-left: auto; color: var(--muted); text-decoration: none; font-size: 13px; }
   .set-link:hover { color: var(--text); }
 
+  /* ── Modale réglages ── */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,.55);
+    display: flex; align-items: center; justify-content: center; z-index: 50; padding: 20px;
+  }
+  .modal-backdrop[hidden] { display: none; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    width: 100%; max-width: 420px; box-shadow: 0 20px 60px rgba(0,0,0,.5);
+  }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 18px 20px; border-bottom: 1px solid var(--border); }
+  .modal-head h3 { margin: 0; font-size: 16px; }
+  .modal-close { background: none; color: var(--muted); font-size: 18px; padding: 2px 8px; }
+  .modal-close:hover { color: var(--text); }
+  .modal-body { padding: 20px; }
+  .modal-body .field { margin-bottom: 16px; }
+  .modal-body select, .modal-body input[type=password] {
+    width: 100%; background: #0e0f13; border: 1px solid var(--border); color: var(--text);
+    padding: 9px 11px; border-radius: 8px; font-size: 14px; font-family: inherit;
+  }
+  .set-lbl { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  .set-hint { font-size: 12px; min-height: 14px; color: var(--muted); }
+  .set-hint.ok { color: #2ecc71; } .set-hint.err { color: #ff6b6b; }
+  .modal-foot { padding: 0 20px 20px; }
+  .modal-foot button { width: 100%; }
+
   /* ── Scène ── */
   .stage {
     display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px 24px;
@@ -157,7 +183,7 @@
   <img src="Image/Logo.png" alt="Table Ronde IA" style="height:40px;object-fit:contain;" />
   <div class="status">
     <span class="dot" id="dot"></span><span id="statusText">Déconnecté</span>
-    <a href="admin.html" title="Administration" style="color:var(--muted);text-decoration:none;font-size:16px;margin-left:6px;">⚙</a>
+    <a href="#" id="openSettings1" title="Réglages" style="color:var(--muted);text-decoration:none;font-size:16px;margin-left:6px;">⚙</a>
   </div>
 </header>
 <div class="wrap">
@@ -174,7 +200,7 @@
         <span class="slider"></span>
       </label>
       <span class="tts-label" id="ttsLabel">Audio désactivé</span>
-      <a href="admin.html" class="set-link" title="Réglages (modèle, voix)">⚙ Réglages</a>
+      <a href="#" id="openSettings2" class="set-link" title="Réglages (modèle, voix)">⚙ Réglages</a>
     </div>
   </div>
 
@@ -211,6 +237,37 @@
 
   <div class="transcript" id="transcript">
     <div class="empty">Choisissez un sujet et démarrez le débat.</div>
+  </div>
+</div>
+
+<!-- Modale réglages : s'ouvre par-dessus, sans quitter la page (débat préservé) -->
+<div class="modal-backdrop" id="settingsModal" hidden>
+  <div class="modal">
+    <div class="modal-head">
+      <h3>Réglages audio</h3>
+      <button class="modal-close" id="settingsClose" type="button" title="Fermer">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label class="set-lbl">Fournisseur de voix</label>
+        <select id="provSel">
+          <option value="openai">OpenAI</option>
+          <option value="elevenlabs">ElevenLabs</option>
+        </select>
+      </div>
+      <div class="field">
+        <label class="set-lbl">Modèle</label>
+        <select id="modelSel"></select>
+      </div>
+      <div class="field" id="tokenRow">
+        <label class="set-lbl">Token bridge (requis pour modifier)</label>
+        <input type="password" id="tokenInput" placeholder="Bearer token…" autocomplete="off" />
+      </div>
+      <div class="set-hint" id="setHint"></div>
+    </div>
+    <div class="modal-foot">
+      <button id="settingsSave" type="button">Enregistrer</button>
+    </div>
   </div>
 </div>
 
@@ -475,6 +532,74 @@ ttsToggle.addEventListener('change', async () => {
     ttsToggle.checked = !ttsToggle.checked; // annule le toggle
     updateTtsLabel(!skip);
   }
+});
+
+// ── Modale réglages (fournisseur + modèle) — sans quitter la page ────────────
+const TOKEN_KEY = 'tr_bridgeToken';
+const provSel = $('provSel'), modelSel = $('modelSel'), tokenInput = $('tokenInput');
+let ttsCfg = null;
+
+function setSetHint(msg, cls) { const h = $('setHint'); h.textContent = msg || ''; h.className = 'set-hint' + (cls ? ' ' + cls : ''); }
+function providerLabel(v) { return v === 'openai' ? 'OpenAI' : 'ElevenLabs'; }
+
+function fillModelOptions() {
+  if (!ttsCfg) return;
+  const prov = provSel.value;
+  const info = ttsCfg.providers[prov] || { models: [] };
+  const current = prov === 'openai' ? ttsCfg.openaiModel : ttsCfg.elevenModel;
+  modelSel.innerHTML = '';
+  (info.models || []).forEach((m) => {
+    const o = document.createElement('option');
+    o.value = m; o.textContent = m; if (m === current) o.selected = true;
+    modelSel.appendChild(o);
+  });
+  [...provSel.options].forEach((o) => {
+    const av = ttsCfg.providers[o.value] && ttsCfg.providers[o.value].available;
+    o.disabled = !av;
+    o.textContent = providerLabel(o.value) + (av ? '' : ' (clé manquante)');
+  });
+}
+
+async function openSettings(e) {
+  if (e) e.preventDefault();
+  setSetHint('');
+  $('settingsModal').hidden = false;
+  try {
+    const r = await fetch(bridgeHttpUrl() + '/tts/config');
+    if (!r.ok) { setSetHint('Config indisponible', 'err'); return; }
+    ttsCfg = await r.json();
+    provSel.value = ttsCfg.provider;
+    fillModelOptions();
+    $('tokenRow').style.display = ttsCfg.tokenRequired ? '' : 'none';
+    tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
+  } catch (err) { setSetHint('Bridge injoignable', 'err'); }
+}
+function closeSettings() { $('settingsModal').hidden = true; }
+
+$('openSettings1').addEventListener('click', openSettings);
+$('openSettings2').addEventListener('click', openSettings);
+$('settingsClose').addEventListener('click', closeSettings);
+$('settingsModal').addEventListener('click', (e) => { if (e.target === $('settingsModal')) closeSettings(); });
+provSel.addEventListener('change', fillModelOptions);
+
+$('settingsSave').addEventListener('click', async () => {
+  const token = tokenInput.value.trim();
+  if (token) localStorage.setItem(TOKEN_KEY, token);
+  const patch = { provider: provSel.value };
+  if (provSel.value === 'openai') patch.openaiModel = modelSel.value; else patch.elevenModel = modelSel.value;
+  setSetHint('Enregistrement…');
+  try {
+    const r = await fetch(bridgeHttpUrl() + '/tts/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: JSON.stringify(patch),
+    });
+    if (r.status === 401) { setSetHint('Token invalide ou manquant.', 'err'); return; }
+    if (!r.ok) { setSetHint('Erreur ' + r.status, 'err'); return; }
+    ttsCfg = { ...ttsCfg, ...(await r.json()) };
+    setSetHint('✓ Enregistré', 'ok');
+    setTimeout(closeSettings, 800);
+  } catch (e) { setSetHint('Bridge injoignable', 'err'); }
 });
 </script>
 </body>
