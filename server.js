@@ -8,7 +8,17 @@ const { createClient } = require('redis');
 const path = require('path');
 
 const app = express();
-app.use(express.json({ limit: '10mb' }));
+app.disable('x-powered-by');
+// En-têtes de sécurité (HTTPS/WSS actif via Traefik). Pas de CSP ici pour ne pas
+// casser le frontend (styles/scripts inline) ; HSTS n'a d'effet qu'en HTTPS.
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains');
+  next();
+});
+app.use(express.json({ limit: '1mb' }));
 // Sert le frontend statique (index.html + images) à la racine
 app.use(express.static(path.join(__dirname, 'public')));
 const httpServer = createServer(app);
@@ -302,7 +312,7 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
 });
 
 // ── POST /stop — arrête un débat en cours (libère pour en relancer un) ──────
-app.post('/stop', async (req, res) => {
+app.post('/stop', rateLimit, async (req, res) => {
   const { session_id } = req.body;
   if (!session_id) return res.status(400).json({ error: 'session_id requis' });
   stoppedSessions.add(session_id);
@@ -320,7 +330,7 @@ app.get('/tts', (_req, res) => {
 });
 
 // ── POST /tts — { skip: true|false } (compat, garde l'ancien toggle) ────────
-app.post('/tts', async (req, res) => {
+app.post('/tts', rateLimit, async (req, res) => {
   const { skip } = req.body;
   if (typeof skip !== 'boolean') return res.status(400).json({ error: 'skip doit être un booléen' });
   ttsConfig.enabled = !skip;
@@ -345,7 +355,7 @@ app.get('/tts/config', (_req, res) => {
 });
 
 // ── POST /tts/config — met à jour la config (écriture protégée par token) ───
-app.post('/tts/config', requireToken, async (req, res) => {
+app.post('/tts/config', rateLimit, requireToken, async (req, res) => {
   const { enabled, provider, openaiModel, elevenModel } = req.body;
   if (typeof enabled === 'boolean') ttsConfig.enabled = enabled;
   if (provider === 'openai' || provider === 'elevenlabs') ttsConfig.provider = provider;
