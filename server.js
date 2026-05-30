@@ -33,6 +33,12 @@ function broadcast(data) {
   });
 }
 
+// ── Sessions stoppées par l'utilisateur (arrêt à chaud d'un débat) ──────────
+// Une session ajoutée ici fait court-circuiter tous ses tours /speak restants
+// (le tour en cours s'interrompt aussi), ce qui libère immédiatement pour
+// relancer un autre débat. Nettoyage auto après 5 min.
+const stoppedSessions = new Set();
+
 // ── Redis ───────────────────────────────────────────────────────────────────
 const redis = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
 redis.on('error', (err) => console.error('[Redis]', err));
@@ -194,6 +200,12 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
   const agent = AGENTS[speaker];
   if (!agent) return res.status(400).json({ error: `Agent inconnu : ${speaker}` });
 
+  // Débat arrêté par l'utilisateur → on ne génère rien pour cette session
+  if (stoppedSessions.has(session_id)) {
+    broadcast({ type: 'speaker_end', speaker, sessionId: session_id });
+    return res.json({ text: '', speaker, session_id, stopped: true });
+  }
+
   const ttsOn = ttsConfig.enabled;
   const provider = ttsConfig.provider;
 
@@ -242,13 +254,14 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
     const mistralStream = await mistral.chat.stream({
       model: agent.model,
       messages: [{ role: 'system', content: system_prompt }, ...messages],
-      maxTokens: 400,
+      maxTokens: 220,
       temperature: 0.72,
     });
 
     let buffer = '';
 
     for await (const chunk of mistralStream) {
+      if (stoppedSessions.has(session_id)) break; // arrêt à chaud → on coupe le tour
       const delta = chunk.data?.choices?.[0]?.delta?.content || '';
       if (!delta) continue;
 
@@ -286,6 +299,19 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
     await redis.del(lockKey);
     tts.close();
   }
+});
+
+// ── POST /stop — arrête un débat en cours (libère pour en relancer un) ──────
+app.post('/stop', async (req, res) => {
+  const { session_id } = req.body;
+  if (!session_id) return res.status(400).json({ error: 'session_id requis' });
+  stoppedSessions.add(session_id);
+  try { await redis.del(`session:${session_id}:lock`); } catch (e) { /* best effort */ }
+  broadcast({ type: 'stopped', sessionId: session_id });
+  console.log(`[Bridge] Débat ${session_id} arrêté par l'utilisateur`);
+  // Nettoyage pour éviter une croissance non bornée du Set
+  setTimeout(() => stoppedSessions.delete(session_id), 5 * 60 * 1000);
+  res.json({ stopped: session_id });
 });
 
 // ── GET /tts — état courant (compat : skip = audio désactivé) ───────────────

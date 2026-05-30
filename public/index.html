@@ -382,7 +382,16 @@ function setRunning(on) {
 }
 
 function stopDebate() {
+  const sid = currentSession;
   currentSession = null; // ignore tout message résiduel
+  // Coupe le débat côté serveur (bridge) → libère pour en relancer un autre
+  if (sid) {
+    fetch(bridgeHttpUrl() + '/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid }),
+    }).catch(() => {});
+  }
   if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} ws = null; }
   try { player.pause(); } catch (e) {}
   audioQueue = []; sbReady = false;
