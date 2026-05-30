@@ -39,6 +39,8 @@
     overflow: hidden;
   }
   .launcher.collapsed { max-height: 0; padding: 0 20px; margin-bottom: 0; opacity: 0; border-color: transparent; }
+  .controlbar { margin-bottom: 24px; }
+  .controlbar button { width: 100%; padding: 13px 20px; }
   .launcher label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 6px; }
   .launcher input {
     width: 100%; background: #0e0f13; border: 1px solid var(--border); color: var(--text);
@@ -165,7 +167,6 @@
         <label>Sujet du débat</label>
         <input id="topic" value="L'avenir de l'intelligence artificielle" />
       </div>
-      <button id="startBtn">▶ Démarrer le débat</button>
     </div>
     <div class="tts-row">
       <label class="switch">
@@ -175,6 +176,11 @@
       <span class="tts-label" id="ttsLabel">Audio désactivé</span>
       <a href="admin.html" class="set-link" title="Réglages (modèle, voix)">⚙ Réglages</a>
     </div>
+  </div>
+
+  <!-- Barre de contrôle : toujours visible (démarrer / arrêter) -->
+  <div class="controlbar">
+    <button id="startBtn">▶ Démarrer le débat</button>
   </div>
 
   <!-- Scène : les 4 intervenants autour de la table -->
@@ -414,14 +420,19 @@ function startDebate() {
   initAudio();
   if (!connectWS()) return;
   setRunning(true);
+  const mySession = currentSession; // pour ignorer la réponse d'un débat arrêté entre-temps
   // Fire-and-forget : on n'attend pas la fin du débat, l'audio arrive par WebSocket
   fetch(webhook, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic: $('topic').value.trim(), session_id: currentSession }),
+    body: JSON.stringify({ topic: $('topic').value.trim(), session_id: mySession }),
   })
-    .then(() => { if (running) setStatus('Débat terminé', 'ok'); setRunning(false); })
-    .catch(() => setStatus('Webhook injoignable', 'err'));
+    .then(() => {
+      if (currentSession !== mySession) return; // un autre débat tourne déjà → on ignore
+      if (running) setStatus('Débat terminé', 'ok');
+      setRunning(false);
+    })
+    .catch(() => { if (currentSession === mySession) setStatus('Webhook injoignable', 'err'); });
   setStatus('Débat lancé — en attente du premier intervenant…', 'ok');
 }
 
