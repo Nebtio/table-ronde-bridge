@@ -87,9 +87,11 @@ const AGENTS = {
 // ── Ouvre un stream ElevenLabs WebSocket ────────────────────────────────────
 function openElevenLabsStream(voiceId, sessionId, speaker) {
   return new Promise((resolve, reject) => {
+    // Flash v2.5 = modèle ElevenLabs le moins cher (~0,5 crédit/caractère, multilingue FR)
+    const model = process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5';
     const url =
       `wss://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream-input` +
-      `?model_id=eleven_multilingual_v2&output_format=mp3_44100_128`;
+      `?model_id=${model}&output_format=mp3_44100_128`;
 
     const ws = new WebSocket(url, {
       headers: { 'xi-api-key': process.env.ELEVENLABS_API_KEY },
