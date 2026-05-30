@@ -132,6 +132,16 @@
   .turn[data-role="Critique"]{ --c: var(--critique); }
   .empty { color: var(--muted); text-align: center; padding: 50px 0; font-size: 14px; }
 
+  /* ── Barre d'export (bench) ── */
+  .exportbar { display: none; gap: 10px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+  .exportbar.show { display: flex; }
+  .exportbar button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    padding: 8px 14px; font-size: 13px; font-weight: 500;
+  }
+  .exportbar button:hover { border-color: var(--mc); }
+  .export-hint { font-size: 12px; color: var(--muted); }
+
   @media (max-width: 560px) {
     .avatar { width: 72px; height: 72px; }
     .seat[data-role="MC"] .avatar { width: 84px; height: 84px; }
@@ -180,6 +190,12 @@
       <div class="avatar" style="background-image:url('Image/Critique.png')"></div>
       <div class="name">Critique</div><div class="role-tag">Contradiction</div>
     </div>
+  </div>
+
+  <div class="exportbar" id="exportbar">
+    <button id="copyBtn" type="button">📋 Copier le transcript</button>
+    <button id="downloadBtn" type="button">⬇ Télécharger (JSON)</button>
+    <span class="export-hint" id="exportHint"></span>
   </div>
 
   <div class="transcript" id="transcript">
@@ -257,6 +273,8 @@ function enqueueAudio(b64) {
 
 // ── Transcript ──────────────────────────────────────────────────────────────
 let currentTurn = null;
+// Log structuré du débat (pour l'export / benchmark)
+let debateLog = null, currentLogTurn = null;
 
 function startTurn(speaker) {
   if (transcript.querySelector('.empty')) transcript.innerHTML = '';
@@ -271,10 +289,53 @@ function startTurn(speaker) {
   currentTurn = el.querySelector('.txt');
   el.scrollIntoView({ behavior: 'smooth', block: 'end' });
   highlightSeat(speaker);
+  // Log
+  if (debateLog) {
+    currentLogTurn = { speaker, text: '' };
+    debateLog.turns.push(currentLogTurn);
+    $('exportbar').classList.add('show');
+  }
   return el;
 }
-function appendText(t) { if (currentTurn) currentTurn.textContent += t; }
+function appendText(t) {
+  if (currentTurn) currentTurn.textContent += t;
+  if (currentLogTurn) currentLogTurn.text += t;
+}
 function endTurn() { clearSeats(); }
+
+// ── Export du transcript (bench) ──────────────────────────────────────────────
+function logToMarkdown(log) {
+  const head = `# Table Ronde — ${log.topic}\n_session ${log.sessionId} · ${log.startedAt} · ${log.turns.length} tours_\n`;
+  const body = log.turns.map(t => `\n**${t.speaker}** : ${t.text.trim()}`).join('\n');
+  return head + body + '\n';
+}
+function copyTranscript() {
+  if (!debateLog || !debateLog.turns.length) return;
+  const md = logToMarkdown(debateLog);
+  navigator.clipboard.writeText(md).then(
+    () => { $('exportHint').textContent = '✓ Copié dans le presse-papier'; },
+    () => {
+      // Repli : sélection manuelle
+      const ta = document.createElement('textarea');
+      ta.value = md; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); $('exportHint').textContent = '✓ Copié'; }
+      catch (e) { $('exportHint').textContent = 'Copie impossible — voir la console'; console.log(md); }
+      ta.remove();
+    }
+  );
+}
+function downloadTranscript() {
+  if (!debateLog || !debateLog.turns.length) return;
+  const blob = new Blob([JSON.stringify(debateLog, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `debat_${debateLog.sessionId}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  $('exportHint').textContent = '✓ Fichier téléchargé';
+}
+$('copyBtn').onclick = copyTranscript;
+$('downloadBtn').onclick = downloadTranscript;
 
 // ── WebSocket bridge ─────────────────────────────────────────────────────────
 let ws, activeEl = null, currentSession = null;
@@ -327,6 +388,11 @@ function startDebate() {
   transcript.innerHTML = '<div class="empty">Connexion…</div>';
   // Nouvelle session AVANT la connexion, pour filtrer les messages
   currentSession = 'session_' + Date.now();
+  // Réinitialise le log d'export
+  debateLog = { topic: $('topic').value.trim(), sessionId: currentSession, startedAt: new Date().toISOString(), turns: [] };
+  currentLogTurn = null;
+  $('exportbar').classList.remove('show');
+  $('exportHint').textContent = '';
   initAudio();
   if (!connectWS()) return;
   setRunning(true);
