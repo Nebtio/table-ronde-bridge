@@ -415,7 +415,8 @@ function onSpeakerStart(role) {
   $('progCount').textContent = turnCount <= TOTAL_TURNS
     ? 'Intervention ' + turnCount + ' / ' + TOTAL_TURNS
     : 'Intervention ' + turnCount;
-  $('liveSpeaker').textContent = whoLabel(role) + ' a la parole';
+  // Sans audio : on annonce le locuteur tout de suite. Avec audio : c'est la lecture qui pilote.
+  if (!audioEnabled()) $('liveSpeaker').textContent = whoLabel(role) + ' a la parole';
 }
 
 // ── Scène : surbrillance de l'intervenant actif ──────────────────────────────
@@ -430,6 +431,9 @@ function clearSeats() {
 // ── Lecture audio MP3 en streaming (MediaSource) ────────────────────────────
 const player = $('player');
 let mediaSource, sourceBuffer, audioQueue = [], sbReady = false, currentObjUrl = null;
+// Synchro illumination ↔ lecture audio : frontières {speaker, start(s)} le long de la timeline
+let audioSegments = [], lastAppendedSpeaker = null, highlightedSpeaker = null;
+function audioEnabled() { return !!(ttsToggle && ttsToggle.checked); }
 
 // Démonte proprement la lecture en cours : détache le listener, révoque l'object-URL
 function teardownAudio() {
@@ -439,6 +443,8 @@ function teardownAudio() {
   try { player.removeAttribute('src'); player.load(); } catch (e) {}
   if (currentObjUrl) { try { URL.revokeObjectURL(currentObjUrl); } catch (e) {} currentObjUrl = null; }
   sbReady = false; audioQueue = [];
+  audioSegments = []; lastAppendedSpeaker = null; highlightedSpeaker = null;
+  clearSeats();
 }
 function initAudio() {
   teardownAudio(); // évite la fuite d'object-URL et la course de listener au redémarrage
@@ -456,16 +462,46 @@ function initAudio() {
 }
 function pump() {
   if (sbReady && sourceBuffer && !sourceBuffer.updating && audioQueue.length) {
-    try { sourceBuffer.appendBuffer(audioQueue.shift()); } catch (e) { console.error(e); }
+    const item = audioQueue.shift();
+    // Nouvelle voix → on note la frontière à la position audio courante (fin du buffer = début du segment)
+    if (item.speaker && item.speaker !== lastAppendedSpeaker) {
+      let start = 0;
+      try { if (sourceBuffer.buffered.length) start = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1); } catch (e) {}
+      audioSegments.push({ speaker: item.speaker, start });
+      lastAppendedSpeaker = item.speaker;
+    }
+    try { sourceBuffer.appendBuffer(item.bytes); } catch (e) { console.error(e); }
   }
 }
-function enqueueAudio(b64) {
+function enqueueAudio(b64, speaker) {
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  audioQueue.push(bytes); pump();
+  audioQueue.push({ bytes, speaker }); pump();
   if (player.paused) player.play().catch(() => {});
 }
+
+// Illumination pilotée par la LECTURE : on éclaire le siège du locuteur réellement audible
+player.addEventListener('timeupdate', () => {
+  if (!audioEnabled() || !audioSegments.length) return;
+  const t = player.currentTime;
+  let cur = null;
+  for (let i = 0; i < audioSegments.length; i++) {
+    if (audioSegments[i].start <= t + 0.04) cur = audioSegments[i]; else break;
+  }
+  if (cur && cur.speaker !== highlightedSpeaker) {
+    highlightedSpeaker = cur.speaker;
+    highlightSeat(cur.speaker);
+    $('liveSpeaker').textContent = whoLabel(cur.speaker) + ' a la parole';
+  }
+  // Fin réelle de la lecture (génération terminée + file vide) → on éteint
+  if (!running && !audioQueue.length && sourceBuffer && sourceBuffer.buffered.length) {
+    try {
+      const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+      if (t >= end - 0.15) { clearSeats(); highlightedSpeaker = null; }
+    } catch (e) {}
+  }
+});
 
 // ── Transcript ──────────────────────────────────────────────────────────────
 let currentTurn = null;
@@ -483,7 +519,7 @@ function startTurn(speaker) {
   transcript.appendChild(el);
   currentTurn = el.querySelector('.txt');
   el.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  highlightSeat(speaker);
+  // L'illumination du siège est décidée par l'appelant (immédiate sans audio, sinon pilotée par la lecture)
   if (debateLog) {
     currentLogTurn = { speaker, text: '' };
     debateLog.turns.push(currentLogTurn);
@@ -500,8 +536,11 @@ function appendText(t) {
   if (currentLogTurn) currentLogTurn.text += clean;
 }
 function endTurn() {
-  clearSeats();
-  if (running) $('liveSpeaker').textContent = 'Réflexion en cours…';
+  // Avec audio : le siège/label suivent la lecture, on ne coupe pas à la fin de génération.
+  if (!audioEnabled()) {
+    clearSeats();
+    if (running) $('liveSpeaker').textContent = 'Réflexion en cours…';
+  }
 }
 
 // ── Export du transcript (bench) ──────────────────────────────────────────────
@@ -552,9 +591,9 @@ function connectWS() {
     // Rejette tout message porteur de sessionId qui ne correspond pas à la session courante
     // (currentSession null après un arrêt → on rejette aussi, pas de traitement résiduel).
     if (msg.sessionId && msg.sessionId !== currentSession) return;
-    if (msg.type === 'speaker_start') { activeEl = startTurn(msg.speaker); onSpeakerStart(msg.speaker); }
+    if (msg.type === 'speaker_start') { activeEl = startTurn(msg.speaker); onSpeakerStart(msg.speaker); if (!audioEnabled()) highlightSeat(msg.speaker); }
     else if (msg.type === 'text_chunk') { appendText(msg.text); }
-    else if (msg.type === 'audio') { enqueueAudio(msg.data); }
+    else if (msg.type === 'audio') { enqueueAudio(msg.data, msg.speaker); }
     else if (msg.type === 'speaker_end') { endTurn(); }
     else if (msg.type === 'error') { setStatus('Erreur: ' + msg.message, 'err'); endTurn(); }
   };
