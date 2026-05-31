@@ -93,6 +93,9 @@
   .set-hint.ok { color: #2ecc71; } .set-hint.err { color: #ff6b6b; }
   .modal-foot { padding: 0 20px 20px; }
   .modal-foot button { width: 100%; }
+  .vox-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .vox-grid > div { display: flex; flex-direction: column; gap: 4px; }
+  .vox-role { font-size: 11px; color: var(--muted); }
 
   /* ── Scène ── */
   .stage {
@@ -253,11 +256,21 @@
         <select id="provSel">
           <option value="openai">OpenAI</option>
           <option value="elevenlabs">ElevenLabs</option>
+          <option value="voxtral">Voxtral (Mistral)</option>
         </select>
       </div>
       <div class="field">
         <label class="set-lbl">Modèle</label>
         <select id="modelSel"></select>
+      </div>
+      <div class="field" id="voxtralVoicesBlock" style="display:none;">
+        <label class="set-lbl">Voix Voxtral par rôle</label>
+        <div class="vox-grid">
+          <div><span class="vox-role">MC</span><select data-role="MC"></select></div>
+          <div><span class="vox-role">Stratège</span><select data-role="Stratège"></select></div>
+          <div><span class="vox-role">Créatif</span><select data-role="Créatif"></select></div>
+          <div><span class="vox-role">Critique</span><select data-role="Critique"></select></div>
+        </div>
       </div>
       <div class="field" id="tokenRow">
         <label class="set-lbl">Token bridge (requis pour modifier)</label>
@@ -540,13 +553,13 @@ const provSel = $('provSel'), modelSel = $('modelSel'), tokenInput = $('tokenInp
 let ttsCfg = null;
 
 function setSetHint(msg, cls) { const h = $('setHint'); h.textContent = msg || ''; h.className = 'set-hint' + (cls ? ' ' + cls : ''); }
-function providerLabel(v) { return v === 'openai' ? 'OpenAI' : 'ElevenLabs'; }
+function providerLabel(v) { return v === 'openai' ? 'OpenAI' : v === 'elevenlabs' ? 'ElevenLabs' : 'Voxtral (Mistral)'; }
 
 function fillModelOptions() {
   if (!ttsCfg) return;
   const prov = provSel.value;
   const info = ttsCfg.providers[prov] || { models: [] };
-  const current = prov === 'openai' ? ttsCfg.openaiModel : ttsCfg.elevenModel;
+  const current = prov === 'openai' ? ttsCfg.openaiModel : prov === 'elevenlabs' ? ttsCfg.elevenModel : ttsCfg.voxtralModel;
   modelSel.innerHTML = '';
   (info.models || []).forEach((m) => {
     const o = document.createElement('option');
@@ -558,6 +571,36 @@ function fillModelOptions() {
     o.disabled = !av;
     o.textContent = providerLabel(o.value) + (av ? '' : ' (clé manquante)');
   });
+  $('voxtralVoicesBlock').style.display = prov === 'voxtral' ? '' : 'none';
+}
+
+// Charge la liste des voix Voxtral (proxy bridge) et remplit les 4 sélecteurs
+let voxVoicesCache = null;
+async function loadVoxtralVoices() {
+  const selects = [...document.querySelectorAll('#voxtralVoicesBlock select')];
+  try {
+    if (!voxVoicesCache) {
+      const r = await fetch(bridgeHttpUrl() + '/tts/voices');
+      if (!r.ok) { setSetHint('Voix Voxtral indisponibles', 'err'); return; }
+      voxVoicesCache = (await r.json()).voices || [];
+    }
+    const cfgV = (ttsCfg && ttsCfg.voxtralVoices) || {};
+    selects.forEach((sel) => {
+      const role = sel.dataset.role;
+      sel.innerHTML = '';
+      const auto = document.createElement('option');
+      auto.value = ''; auto.textContent = '(auto)';
+      sel.appendChild(auto);
+      voxVoicesCache.forEach((v) => {
+        const o = document.createElement('option');
+        o.value = v.id;
+        o.textContent = v.name + (v.lang ? ' [' + v.lang + ']' : '');
+        if (cfgV[role] === v.id) o.selected = true;
+        sel.appendChild(o);
+      });
+    });
+    if (!voxVoicesCache.length) setSetHint('Aucune voix sur le compte Mistral — « auto » utilisera les préréglages.', '');
+  } catch (e) { setSetHint('Voix Voxtral injoignables', 'err'); }
 }
 
 async function openSettings(e) {
@@ -570,6 +613,7 @@ async function openSettings(e) {
     ttsCfg = await r.json();
     provSel.value = ttsCfg.provider;
     fillModelOptions();
+    if (ttsCfg.provider === 'voxtral') loadVoxtralVoices();
     $('tokenRow').style.display = ttsCfg.tokenRequired ? '' : 'none';
     tokenInput.value = localStorage.getItem(TOKEN_KEY) || '';
   } catch (err) { setSetHint('Bridge injoignable', 'err'); }
@@ -580,13 +624,23 @@ $('openSettings1').addEventListener('click', openSettings);
 $('openSettings2').addEventListener('click', openSettings);
 $('settingsClose').addEventListener('click', closeSettings);
 $('settingsModal').addEventListener('click', (e) => { if (e.target === $('settingsModal')) closeSettings(); });
-provSel.addEventListener('change', fillModelOptions);
+provSel.addEventListener('change', () => {
+  fillModelOptions();
+  if (provSel.value === 'voxtral') loadVoxtralVoices();
+});
 
 $('settingsSave').addEventListener('click', async () => {
   const token = tokenInput.value.trim();
   if (token) localStorage.setItem(TOKEN_KEY, token);
   const patch = { provider: provSel.value };
-  if (provSel.value === 'openai') patch.openaiModel = modelSel.value; else patch.elevenModel = modelSel.value;
+  if (provSel.value === 'openai') patch.openaiModel = modelSel.value;
+  else if (provSel.value === 'elevenlabs') patch.elevenModel = modelSel.value;
+  else if (provSel.value === 'voxtral') {
+    patch.voxtralModel = modelSel.value;
+    const vv = {};
+    document.querySelectorAll('#voxtralVoicesBlock select').forEach((sel) => { if (sel.value) vv[sel.dataset.role] = sel.value; });
+    patch.voxtralVoices = vv;
+  }
   setSetHint('Enregistrement…');
   try {
     const r = await fetch(bridgeHttpUrl() + '/tts/config', {

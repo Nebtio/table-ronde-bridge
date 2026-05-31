@@ -61,9 +61,11 @@ const mistral = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });
 // Modifiable à chaud via /tts/config (page d'admin) ; survit aux redémarrages.
 const DEFAULT_TTS = {
   enabled: !(process.env.skipTts === 'true'), // rétro-compat : skipTts=true → audio off
-  provider: 'openai',                          // 'openai' | 'elevenlabs'
+  provider: 'openai',                          // 'openai' | 'elevenlabs' | 'voxtral'
   openaiModel: 'gpt-4o-mini-tts',              // moins cher / multilingue
   elevenModel: process.env.ELEVENLABS_MODEL || 'eleven_flash_v2_5',
+  voxtralModel: 'voxtral-mini-tts-2603',       // TTS Mistral (même clé API que le LLM)
+  voxtralVoices: {},                           // { MC, Stratège, Créatif, Critique } -> voice_id
 };
 const ttsConfig = { ...DEFAULT_TTS };
 const TTS_CONFIG_KEY = 'bridge:tts:config';
@@ -141,6 +143,54 @@ async function openAITTS(text, voice, model) {
   }
   const buf = Buffer.from(await resp.arrayBuffer());
   return buf.toString('base64');
+}
+
+// ── Voxtral TTS (Mistral) : texte → MP3 base64 (un appel par phrase) ─────────
+// Endpoint POST /v1/audio/speech ; réponse JSON { audio_data: base64 }.
+async function voxtralTTS(text, voiceId, model) {
+  const resp = await fetch('https://api.mistral.ai/v1/audio/speech', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${process.env.MISTRAL_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ model, input: text, voice_id: voiceId, response_format: 'mp3' }),
+  });
+  if (!resp.ok) {
+    const errTxt = await resp.text();
+    throw new Error(`Voxtral TTS ${resp.status}: ${errTxt.slice(0, 200)}`);
+  }
+  const data = await resp.json();
+  return data.audio_data; // déjà en base64
+}
+
+// ── Liste des voix Voxtral du compte Mistral (cache 5 min) ──────────────────
+let _voxVoices = { at: 0, list: [] };
+async function getVoxtralVoices(force) {
+  const fresh = Date.now() - _voxVoices.at < 5 * 60 * 1000;
+  if (!force && fresh && _voxVoices.list.length) return _voxVoices.list;
+  const resp = await fetch('https://api.mistral.ai/v1/audio/voices', {
+    headers: { Authorization: `Bearer ${process.env.MISTRAL_API_KEY}` },
+  });
+  if (!resp.ok) throw new Error(`Voxtral voices ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+  const data = await resp.json();
+  // L'API Mistral renvoie { items: [...] } (préréglages + voix clonées du compte)
+  const list = Array.isArray(data) ? data : (data.items || data.data || data.voices || []);
+  _voxVoices = { at: Date.now(), list };
+  return list;
+}
+
+// Résout la voix Voxtral d'un rôle : config explicite → sinon auto-assignation
+// déterministe depuis la liste du compte (une voix distincte par rôle).
+function resolveVoxtralVoice(speaker) {
+  const fromCfg = (ttsConfig.voxtralVoices || {})[speaker];
+  if (fromCfg) return fromCfg;
+  const list = _voxVoices.list;
+  if (!list.length) return null;
+  const roles = ['MC', 'Stratège', 'Créatif', 'Critique'];
+  const idx = Math.max(0, roles.indexOf(speaker)) % list.length;
+  const v = list[idx];
+  return v && (v.id || v.voice_id || v.name) || null;
 }
 
 // ── Ouvre un stream ElevenLabs WebSocket ────────────────────────────────────
@@ -226,6 +276,11 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
   if (ttsOn && provider === 'openai' && !process.env.OPENAI_API_KEY) {
     return res.status(500).json({ error: 'OPENAI_API_KEY non configuré' });
   }
+  if (ttsOn && provider === 'voxtral') {
+    if (!process.env.MISTRAL_API_KEY) return res.status(500).json({ error: 'MISTRAL_API_KEY non configuré' });
+    try { await getVoxtralVoices(); } catch (e) { return res.status(500).json({ error: 'Voxtral (voix) : ' + e.message }); }
+    if (!resolveVoxtralVoice(speaker)) return res.status(500).json({ error: 'Aucune voix Voxtral configurée/disponible' });
+  }
 
   // Lock Redis anti-chevauchement
   const lockKey = `session:${session_id}:lock`;
@@ -256,6 +311,18 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
           .then(() => openAITTS(text, agent.openaiVoice, ttsConfig.openaiModel))
           .then((b64) => broadcast({ type: 'audio', speaker, sessionId: session_id, data: b64 }))
           .catch((e) => console.error('[OpenAI TTS]', e.message));
+      };
+      tts.finish = async () => { await openaiChain; };
+    } else if (ttsOn && provider === 'voxtral') {
+      // Voxtral (Mistral) : même logique de chaînage séquentiel que OpenAI
+      const voiceId = resolveVoxtralVoice(speaker);
+      tts.sendSentence = (t) => {
+        const text = t.trim();
+        if (!text) return;
+        openaiChain = openaiChain
+          .then(() => voxtralTTS(text, voiceId, ttsConfig.voxtralModel))
+          .then((b64) => { if (b64) broadcast({ type: 'audio', speaker, sessionId: session_id, data: b64 }); })
+          .catch((e) => console.error('[Voxtral TTS]', e.message));
       };
       tts.finish = async () => { await openaiChain; };
     }
@@ -346,21 +413,47 @@ app.get('/tts/config', (_req, res) => {
     provider: ttsConfig.provider,
     openaiModel: ttsConfig.openaiModel,
     elevenModel: ttsConfig.elevenModel,
+    voxtralModel: ttsConfig.voxtralModel,
+    voxtralVoices: ttsConfig.voxtralVoices || {},
     providers: {
       openai: { available: !!process.env.OPENAI_API_KEY, models: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'] },
       elevenlabs: { available: !!process.env.ELEVENLABS_API_KEY, models: ['eleven_flash_v2_5', 'eleven_multilingual_v2'] },
+      voxtral: { available: !!process.env.MISTRAL_API_KEY, models: ['voxtral-mini-tts-2603'] },
     },
     tokenRequired: !!BRIDGE_TOKEN,
   });
 });
 
+// ── GET /tts/voices — liste les voix Voxtral du compte Mistral (proxy) ──────
+app.get('/tts/voices', async (_req, res) => {
+  if (!process.env.MISTRAL_API_KEY) return res.status(400).json({ error: 'MISTRAL_API_KEY non configuré' });
+  try {
+    const list = await getVoxtralVoices(true);
+    // Normalise : { id, name, lang, gender }
+    const voices = list.map((v) => ({
+      id: v.id || v.voice_id || v.name,
+      name: v.name || v.slug || v.id,
+      lang: (v.languages || []).join(','),
+      gender: v.gender || '',
+    })).filter((v) => v.id);
+    res.json({ voices });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+
 // ── POST /tts/config — met à jour la config (écriture protégée par token) ───
 app.post('/tts/config', rateLimit, requireToken, async (req, res) => {
-  const { enabled, provider, openaiModel, elevenModel } = req.body;
+  const { enabled, provider, openaiModel, elevenModel, voxtralModel, voxtralVoices } = req.body;
   if (typeof enabled === 'boolean') ttsConfig.enabled = enabled;
-  if (provider === 'openai' || provider === 'elevenlabs') ttsConfig.provider = provider;
+  if (provider === 'openai' || provider === 'elevenlabs' || provider === 'voxtral') ttsConfig.provider = provider;
   if (typeof openaiModel === 'string' && openaiModel) ttsConfig.openaiModel = openaiModel;
   if (typeof elevenModel === 'string' && elevenModel) ttsConfig.elevenModel = elevenModel;
+  if (typeof voxtralModel === 'string' && voxtralModel) ttsConfig.voxtralModel = voxtralModel;
+  if (voxtralVoices && typeof voxtralVoices === 'object') {
+    const allowed = ['MC', 'Stratège', 'Créatif', 'Critique'];
+    const clean = {};
+    for (const r of allowed) if (typeof voxtralVoices[r] === 'string' && voxtralVoices[r]) clean[r] = voxtralVoices[r];
+    ttsConfig.voxtralVoices = clean;
+  }
   await saveTtsConfig();
   console.log('[Bridge] Config TTS mise à jour :', ttsConfig);
   res.json(ttsConfig);
