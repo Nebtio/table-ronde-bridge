@@ -409,10 +409,12 @@ function resetLive(topic) {
 }
 function onSpeakerStart(role) {
   turnCount++;
-  const n = Math.min(turnCount, TOTAL_TURNS);
   const pct = Math.min(100, Math.round((turnCount / TOTAL_TURNS) * 100));
   $('progBar').style.width = pct + '%';
-  $('progCount').textContent = 'Intervention ' + n + ' / ' + TOTAL_TURNS;
+  // ESTIMATION_TOURS = repère indicatif ; si la séquence dépasse, on n'affiche plus « n / N » figé
+  $('progCount').textContent = turnCount <= TOTAL_TURNS
+    ? 'Intervention ' + turnCount + ' / ' + TOTAL_TURNS
+    : 'Intervention ' + turnCount;
   $('liveSpeaker').textContent = whoLabel(role) + ' a la parole';
 }
 
@@ -427,12 +429,22 @@ function clearSeats() {
 
 // ── Lecture audio MP3 en streaming (MediaSource) ────────────────────────────
 const player = $('player');
-let mediaSource, sourceBuffer, audioQueue = [], sbReady = false;
+let mediaSource, sourceBuffer, audioQueue = [], sbReady = false, currentObjUrl = null;
 
-function initAudio() {
-  mediaSource = new MediaSource();
-  player.src = URL.createObjectURL(mediaSource);
+// Démonte proprement la lecture en cours : détache le listener, révoque l'object-URL
+function teardownAudio() {
+  try { if (sourceBuffer) sourceBuffer.removeEventListener('updateend', pump); } catch (e) {}
+  sourceBuffer = null;
+  try { player.pause(); } catch (e) {}
+  try { player.removeAttribute('src'); player.load(); } catch (e) {}
+  if (currentObjUrl) { try { URL.revokeObjectURL(currentObjUrl); } catch (e) {} currentObjUrl = null; }
   sbReady = false; audioQueue = [];
+}
+function initAudio() {
+  teardownAudio(); // évite la fuite d'object-URL et la course de listener au redémarrage
+  mediaSource = new MediaSource();
+  currentObjUrl = URL.createObjectURL(mediaSource);
+  player.src = currentObjUrl;
   mediaSource.addEventListener('sourceopen', () => {
     try {
       sourceBuffer = mediaSource.addSourceBuffer('audio/mpeg');
@@ -572,8 +584,7 @@ function stopDebate() {
     }).catch(() => {});
   }
   if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} ws = null; }
-  try { player.pause(); } catch (e) {}
-  audioQueue = []; sbReady = false;
+  teardownAudio();
   clearSeats();
   setRunning(false);
   setStatus('Débat arrêté', '');
