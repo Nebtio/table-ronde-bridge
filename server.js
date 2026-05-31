@@ -9,6 +9,8 @@ const path = require('path');
 
 const app = express();
 app.disable('x-powered-by');
+// Derrière Traefik (1 hop) : prend la vraie IP client (X-Forwarded-For) pour le rate-limit
+app.set('trust proxy', 1);
 // En-têtes de sécurité (HTTPS/WSS actif via Traefik). Pas de CSP ici pour ne pas
 // casser le frontend (styles/scripts inline) ; HSTS n'a d'effet qu'en HTTPS.
 app.use((_req, res, next) => {
@@ -229,8 +231,8 @@ function openElevenLabsStream(voiceId, sessionId, speaker) {
     ws.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw);
-        if (msg.audio) {
-          // Diffuse les chunks audio (base64 MP3) au frontend
+        if (msg.audio && !stoppedSessions.has(sessionId)) {
+          // Diffuse les chunks audio (base64 MP3) au frontend (sauf si débat stoppé)
           broadcast({ type: 'audio', speaker, sessionId, data: msg.audio });
         }
         if (msg.isFinal) finishResolve();
@@ -278,8 +280,17 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
   }
   if (ttsOn && provider === 'voxtral') {
     if (!process.env.MISTRAL_API_KEY) return res.status(500).json({ error: 'MISTRAL_API_KEY non configuré' });
-    try { await getVoxtralVoices(); } catch (e) { return res.status(500).json({ error: 'Voxtral (voix) : ' + e.message }); }
+    const explicit = (ttsConfig.voxtralVoices || {})[speaker];
+    // On n'interroge la liste du compte que si aucune voix n'est explicitement configurée
+    // (sinon une panne de /v1/audio/voices casserait un débat pourtant valide).
+    if (!explicit) {
+      try { await getVoxtralVoices(); } catch (e) { return res.status(500).json({ error: 'Voxtral (voix) : ' + e.message }); }
+    }
     if (!resolveVoxtralVoice(speaker)) return res.status(500).json({ error: 'Aucune voix Voxtral configurée/disponible' });
+    // Si la liste est déjà en cache, on vérifie qu'une voix explicite existe encore (sinon échec silencieux)
+    if (explicit && _voxVoices.list.length && !_voxVoices.list.some(v => (v.id || v.voice_id || v.name) === explicit)) {
+      return res.status(500).json({ error: 'Voix Voxtral configurée introuvable sur le compte : ' + explicit });
+    }
   }
 
   // Lock Redis anti-chevauchement
@@ -309,7 +320,7 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
         if (!text) return;
         openaiChain = openaiChain
           .then(() => openAITTS(text, agent.openaiVoice, ttsConfig.openaiModel))
-          .then((b64) => broadcast({ type: 'audio', speaker, sessionId: session_id, data: b64 }))
+          .then((b64) => { if (!stoppedSessions.has(session_id)) broadcast({ type: 'audio', speaker, sessionId: session_id, data: b64 }); })
           .catch((e) => console.error('[OpenAI TTS]', e.message));
       };
       tts.finish = async () => { await openaiChain; };
@@ -321,7 +332,7 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
         if (!text) return;
         openaiChain = openaiChain
           .then(() => voxtralTTS(text, voiceId, ttsConfig.voxtralModel))
-          .then((b64) => { if (b64) broadcast({ type: 'audio', speaker, sessionId: session_id, data: b64 }); })
+          .then((b64) => { if (b64 && !stoppedSessions.has(session_id)) broadcast({ type: 'audio', speaker, sessionId: session_id, data: b64 }); })
           .catch((e) => console.error('[Voxtral TTS]', e.message));
       };
       tts.finish = async () => { await openaiChain; };
@@ -358,7 +369,7 @@ app.post('/speak', rateLimit, requireToken, async (req, res) => {
       }
     }
 
-    if (ttsOn) {
+    if (ttsOn && !stoppedSessions.has(session_id)) {
       if (buffer.trim()) tts.sendSentence(buffer); // vide le reste
       await tts.finish();                          // attend la fin de l'audio
     }

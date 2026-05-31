@@ -537,12 +537,14 @@ function connectWS() {
   ws.onerror = () => setStatus('Erreur WebSocket', 'err');
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.sessionId && currentSession && msg.sessionId !== currentSession) return;
+    // Rejette tout message porteur de sessionId qui ne correspond pas à la session courante
+    // (currentSession null après un arrêt → on rejette aussi, pas de traitement résiduel).
+    if (msg.sessionId && msg.sessionId !== currentSession) return;
     if (msg.type === 'speaker_start') { activeEl = startTurn(msg.speaker); onSpeakerStart(msg.speaker); }
     else if (msg.type === 'text_chunk') { appendText(msg.text); }
     else if (msg.type === 'audio') { enqueueAudio(msg.data); }
     else if (msg.type === 'speaker_end') { endTurn(); }
-    else if (msg.type === 'error') { setStatus('Erreur: ' + msg.message, 'err'); }
+    else if (msg.type === 'error') { setStatus('Erreur: ' + msg.message, 'err'); endTurn(); }
   };
   return true;
 }
@@ -677,7 +679,8 @@ let voxVoicesCache = null;
 async function loadVoxtralVoices() {
   const selects = [...document.querySelectorAll('#voxtralVoicesBlock select')];
   try {
-    if (!voxVoicesCache) {
+    // Re-fetche tant que le cache est vide (une liste vide ne doit pas être figée)
+    if (!voxVoicesCache || !voxVoicesCache.length) {
       const r = await fetch(bridgeHttpUrl() + '/tts/voices');
       if (!r.ok) { setSetHint('Voix Voxtral indisponibles', 'err'); return; }
       voxVoicesCache = (await r.json()).voices || [];
